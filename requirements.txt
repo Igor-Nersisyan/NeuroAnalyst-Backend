@@ -1,0 +1,7 @@
+openai
+flask
+flask-cors
+beautifulsoup4
+requests
+tldextract
+gunicorn
