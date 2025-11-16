@@ -16,8 +16,9 @@ from openai import OpenAI
 # -------------------------------
 # ⚙️ Конфигурация
 # -------------------------------
-MAIN_PROMPT_URL = "https://docs.google.com/document/d/1DtA6CzcNeoZSDwj043YmE84XMnv1LAp_Z3MWxP8n55M/edit"
-FOLLOWUP_PROMPT_URL = "https://docs.google.com/document/d/12nwxCLf4Gk4daR7ecRA04rZe-RToNb8-TAtERzY4o0E/edit"
+# ФИКС: Используем export?format=txt для программного доступа к Google Docs
+MAIN_PROMPT_URL = "https://docs.google.com/document/d/1DtA6CzcNeoZSDwj043YmE84XMnv1LAp_Z3MWxP8n55M/export?format=txt"
+FOLLOWUP_PROMPT_URL = "https://docs.google.com/document/d/12nwxCLf4Gk4daR7ecRA04rZe-RToNb8-TAtERzY4o0E/export?format=txt"
 
 SESSION_TTL_HOURS = 24
 MAX_SESSIONS = 100
@@ -228,6 +229,10 @@ def analyze():
     logger.info("=" * 60)
     logger.info("🆕 /analyze")
     
+    # Детальное логирование запроса
+    logger.info(f"Request data: {request.json}")
+    logger.info(f"Headers: {dict(request.headers)}")
+    
     cleanup_old_sessions()
     limit_sessions()
     
@@ -253,7 +258,7 @@ def analyze():
         model_output = resp.choices[0].message.content
 
     except Exception as e:
-        logger.error(f"❌ ОШИБКА: {e}")
+        logger.error(f"❌ ОШИБКА: {e}", exc_info=True)  # exc_info=True для полного traceback
         return jsonify({"error": str(e)}), 500
 
     # ПОЛНАЯ перезапись сессии
@@ -309,7 +314,7 @@ def followup():
         sess["history"].append({"role": "assistant", "content": model_text})
 
     except Exception as e:
-        logger.error(f"❌ ОШИБКА: {e}")
+        logger.error(f"❌ ОШИБКА: {e}", exc_info=True)  # exc_info=True для полного traceback
         return jsonify({"error": str(e)}), 500
 
     logger.info(f"✅ Follow-up завершён")
