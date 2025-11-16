@@ -35,14 +35,24 @@ logger = logging.getLogger("neuro-analyst")
 # 📄 Загрузка Google Docs
 # -------------------------------
 def fetch_gdoc_text(gdoc_url: str) -> str:
+    logger.info(f"📄 Начинаю загрузку Google Doc: {gdoc_url}")
     try:
-        r = requests.get(gdoc_url)
+        r = requests.get(gdoc_url, timeout=30)
+        logger.info(f"📄 Статус ответа: {r.status_code}")
         if r.status_code != 200:
+            logger.error(f"❌ Google Doc вернул статус {r.status_code}")
+            logger.error(f"❌ Ответ: {r.text[:500]}")
             raise ValueError(f"Ошибка загрузки Google Doc: {r.status_code}")
         text = r.text.strip()
         logger.info(f"📄 Загружен Google Doc ({len(text):,} символов)")
+        if len(text) < 100:
+            logger.warning(f"⚠️ Подозрительно короткий документ: {text[:100]}")
         return text
+    except requests.RequestException as e:
+        logger.error(f"❌ Ошибка при загрузке Google Doc: {e}")
+        raise ValueError(f"Ошибка загрузки документа: {e}")
     except Exception as e:
+        logger.error(f"❌ Неожиданная ошибка: {e}", exc_info=True)
         raise ValueError(f"Ошибка загрузки документа: {e}")
 
 
@@ -90,7 +100,8 @@ def safe_json(obj):
 
 
 def crawl_site(start_url, max_pages=25, depth=1):
-    logger.info(f"🔎 Парсинг: {start_url}")
+    logger.info(f"🔎 Начинаю парсинг: {start_url}")
+    logger.info(f"🔎 Параметры: max_pages={max_pages}, depth={depth}")
     
     visited, queue = set(), [(start_url, 0)]
     pages = []
@@ -104,16 +115,22 @@ def crawl_site(start_url, max_pages=25, depth=1):
         logger.info(f"🌐 [{len(pages)+1}/{max_pages}]: {url}")
 
         try:
-            r = requests.get(url, timeout=8, headers={"User-Agent": "NeuroAnalystBot/1.0"})
+            logger.info(f"🌐 Делаю запрос к {url}...")
+            r = requests.get(url, timeout=30, headers={"User-Agent": "NeuroAnalystBot/1.0"})
+            logger.info(f"🌐 Статус: {r.status_code}")
+            
             if r.status_code != 200:
+                logger.warning(f"⚠️ Пропускаю {url}: статус {r.status_code}")
                 continue
 
+            logger.info(f"🌐 Парсинг HTML...")
             soup = BeautifulSoup(r.text, "html.parser")
             for s in soup(["script", "style", "noscript"]):
                 s.extract()
 
             title = soup.title.string.strip() if soup.title else ""
             text = soup.get_text("\n", strip=True)[:20000]
+            logger.info(f"🌐 Извлечено {len(text)} символов текста")
 
             meta = {
                 m.get("name", m.get("property", "")): m.get("content", "")
@@ -127,6 +144,8 @@ def crawl_site(start_url, max_pages=25, depth=1):
                 if link and same_domain(start_url, link):
                     links.append(link)
 
+            logger.info(f"🌐 Найдено {len(links)} ссылок")
+            
             pages.append({
                 "url": url,
                 "title": title,
@@ -139,10 +158,14 @@ def crawl_site(start_url, max_pages=25, depth=1):
                 if l not in visited:
                     queue.append((l, d + 1))
 
+        except requests.Timeout:
+            logger.error(f"⚠️ Таймаут при загрузке {url}")
+        except requests.RequestException as e:
+            logger.error(f"⚠️ Ошибка сети для {url}: {e}")
         except Exception as e:
-            logger.error(f"⚠️ Ошибка {url}: {e}")
+            logger.error(f"⚠️ Ошибка парсинга {url}: {e}", exc_info=True)
 
-    logger.info(f"✅ Собрано {len(pages)} страниц")
+    logger.info(f"✅ Парсинг завершен. Собрано {len(pages)} страниц")
     return {"start_url": start_url, "pages": pages, "count": len(pages)}
 
 
@@ -151,28 +174,52 @@ def crawl_site(start_url, max_pages=25, depth=1):
 # -------------------------------
 def call_main_model(client, prompt_text, site_data):
     logger.info("🤖 Запрос к gpt-5-mini...")
+    logger.info(f"🤖 Размер промпта: {len(prompt_text)} символов")
+    logger.info(f"🤖 Количество страниц в site_data: {site_data.get('count', 0)}")
     
     messages = [
         {"role": "system", "content": prompt_text},
         {"role": "user", "content": json.dumps({"site": site_data}, ensure_ascii=False)},
     ]
     
-    resp = client.chat.completions.create(model="gpt-5-mini", messages=messages)
-    logger.info(f"✅ Ответ получен ({resp.usage.total_tokens:,} токенов)")
-    return resp
+    total_chars = len(prompt_text) + len(json.dumps(site_data))
+    logger.info(f"🤖 Общий размер запроса: {total_chars:,} символов")
+    
+    try:
+        logger.info("🤖 Отправляю запрос к OpenAI...")
+        # БЕЗ ТАЙМАУТОВ - пусть ждет сколько надо
+        resp = client.chat.completions.create(model="gpt-5-mini", messages=messages)
+        logger.info(f"✅ Ответ получен от gpt-5-mini")
+        logger.info(f"✅ Токены: {resp.usage.total_tokens:,} (prompt: {resp.usage.prompt_tokens:,}, completion: {resp.usage.completion_tokens:,})")
+        return resp
+    except Exception as e:
+        logger.error(f"❌ Ошибка при вызове gpt-5-mini: {e}", exc_info=True)
+        raise
 
 
 def call_followup_model(client, followup_prompt_text, json_payload):
     logger.info("💬 Follow-up запрос...")
+    logger.info(f"💬 Размер промпта: {len(followup_prompt_text)} символов")
+    logger.info(f"💬 User instruction: {json_payload.get('user_instruction', 'НЕТ')[:100]}")
     
     messages = [
         {"role": "system", "content": followup_prompt_text},
         {"role": "user", "content": json.dumps(json_payload, ensure_ascii=False)},
     ]
     
-    resp = client.chat.completions.create(model="gpt-5-mini", messages=messages)
-    logger.info(f"✅ Ответ получен ({resp.usage.total_tokens:,} токенов)")
-    return resp
+    total_chars = len(followup_prompt_text) + len(json.dumps(json_payload))
+    logger.info(f"💬 Общий размер запроса: {total_chars:,} символов")
+    
+    try:
+        logger.info("💬 Отправляю follow-up запрос к OpenAI...")
+        # БЕЗ ТАЙМАУТОВ - пусть ждет сколько надо
+        resp = client.chat.completions.create(model="gpt-5-mini", messages=messages)
+        logger.info(f"✅ Follow-up ответ получен от gpt-5-mini")
+        logger.info(f"✅ Токены: {resp.usage.total_tokens:,} (prompt: {resp.usage.prompt_tokens:,}, completion: {resp.usage.completion_tokens:,})")
+        return resp
+    except Exception as e:
+        logger.error(f"❌ Ошибка при вызове follow-up gpt-5-mini: {e}", exc_info=True)
+        raise
 
 
 # -------------------------------
@@ -212,7 +259,14 @@ app = Flask(__name__)
 CORS(app)
 
 # Получаем OpenAI client из env
-OPENAI_CLIENT = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+api_key = os.environ.get("OPENAI_API_KEY")
+if not api_key:
+    logger.error("❌ OPENAI_API_KEY не установлен в переменных окружения!")
+    raise ValueError("OPENAI_API_KEY не найден в переменных окружения")
+
+logger.info(f"🔑 OpenAI API key загружен (последние 4 символа: ...{api_key[-4:]})")
+OPENAI_CLIENT = OpenAI(api_key=api_key)
+logger.info("✅ OpenAI клиент инициализирован")
 
 
 @app.route("/ping", methods=["GET"])
@@ -239,29 +293,44 @@ def analyze():
     data = request.json or {}
     site_url = data.get("site_url")
     existing_sid = data.get("session_id")
+    
+    logger.info(f"📝 site_url: {site_url}")
+    logger.info(f"📝 existing_sid: {existing_sid}")
 
     if not site_url:
+        logger.warning("⚠️ Отсутствует site_url")
         return jsonify({"error": "Нужно указать site_url"}), 400
 
     # Переиспользуем session_id если передан и существует
     if existing_sid and existing_sid in STORE:
         sid = existing_sid
-        logger.info(f"♻️ Переиспользую {sid}")
+        logger.info(f"♻️ Переиспользую session_id: {sid}")
     else:
         sid = str(uuid.uuid4())
-        logger.info(f"🆕 Новый {sid}")
+        logger.info(f"🆕 Новый session_id: {sid}")
 
     try:
+        logger.info("📄 Шаг 1: Загружаю промпт из Google Doc...")
         main_prompt = fetch_gdoc_text(MAIN_PROMPT_URL)
+        logger.info(f"📄 Промпт загружен: {len(main_prompt)} символов")
+        
+        logger.info("🌐 Шаг 2: Начинаю парсинг сайта...")
         site_data = crawl_site(site_url)
+        logger.info(f"🌐 Парсинг завершен: {site_data['count']} страниц")
+        
+        logger.info("🤖 Шаг 3: Отправляю данные в GPT...")
         resp = call_main_model(OPENAI_CLIENT, main_prompt, site_data)
+        
+        logger.info("🤖 Шаг 4: Извлекаю ответ...")
         model_output = resp.choices[0].message.content
+        logger.info(f"🤖 Размер ответа: {len(model_output)} символов")
 
     except Exception as e:
-        logger.error(f"❌ ОШИБКА: {e}", exc_info=True)  # exc_info=True для полного traceback
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА в /analyze: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
     # ПОЛНАЯ перезапись сессии
+    logger.info("💾 Сохраняю сессию...")
     STORE[sid] = {
         "site": site_data,
         "first_output": model_output,
@@ -269,8 +338,9 @@ def analyze():
         "history": [],
         "created_at": datetime.now()
     }
+    logger.info(f"💾 Сессия {sid} сохранена")
 
-    logger.info(f"✅ Анализ завершён")
+    logger.info(f"✅ Анализ завершён успешно")
     logger.info("=" * 60)
 
     return jsonify({
@@ -282,20 +352,30 @@ def analyze():
 
 @app.route("/followup", methods=["POST"])
 def followup():
+    logger.info("=" * 60)
     logger.info("💬 /followup")
     
     data = request.json or {}
     sid = data.get("session_id")
     user_instruction = data.get("followup_prompt")
+    
+    logger.info(f"📝 session_id: {sid}")
+    logger.info(f"📝 user_instruction: {user_instruction[:100] if user_instruction else 'НЕТ'}")
 
     if not sid or sid not in STORE:
+        logger.warning(f"⚠️ session_id {sid} не найден в STORE")
+        logger.info(f"⚠️ Доступные сессии: {list(STORE.keys())}")
         return jsonify({"error": "session_id не найден"}), 404
 
     sess = STORE[sid]
+    logger.info(f"📂 Сессия найдена. История: {len(sess.get('history', []))} сообщений")
 
     try:
+        logger.info("📄 Загружаю follow-up промпт...")
         followup_prompt_text = fetch_gdoc_text(FOLLOWUP_PROMPT_URL)
+        logger.info(f"📄 Follow-up промпт загружен: {len(followup_prompt_text)} символов")
     except Exception as e:
+        logger.error(f"❌ Ошибка загрузки follow-up промпта: {e}", exc_info=True)
         return jsonify({"error": f"Ошибка загрузки промпта: {e}"}), 500
 
     payload = {
@@ -304,20 +384,29 @@ def followup():
         "conversation_history": sess.get("history", []),
         "user_instruction": user_instruction
     }
+    
+    logger.info(f"📦 Размер payload: {len(json.dumps(payload))} символов")
 
     try:
+        logger.info("🤖 Отправляю follow-up запрос в GPT...")
         resp = call_followup_model(OPENAI_CLIENT, followup_prompt_text, payload)
+        
+        logger.info("🤖 Извлекаю ответ...")
         model_text = resp.choices[0].message.content
+        logger.info(f"🤖 Размер ответа: {len(model_text)} символов")
 
+        logger.info("💾 Обновляю сессию...")
         sess["last_followup"] = model_text
         sess["history"].append({"role": "user", "content": user_instruction})
         sess["history"].append({"role": "assistant", "content": model_text})
+        logger.info(f"💾 История обновлена: {len(sess['history'])} сообщений")
 
     except Exception as e:
-        logger.error(f"❌ ОШИБКА: {e}", exc_info=True)  # exc_info=True для полного traceback
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА в /followup: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
-    logger.info(f"✅ Follow-up завершён")
+    logger.info(f"✅ Follow-up завершён успешно")
+    logger.info("=" * 60)
 
     return jsonify({"result": model_text})
 
