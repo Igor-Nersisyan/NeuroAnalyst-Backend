@@ -13,5 +13,5 @@ Flask API для анализа сайтов с помощью GPT.
 
 1. Подключи репозиторий
 2. Build Command: `pip install -r requirements.txt`
-3. Start Command: `gunicorn app:app`
+3. Start Command: `gunicorn app:app --timeout 300`
 4. Добавь Environment Variable: `OPENAI_API_KEY`
